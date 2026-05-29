@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>لعبة الرعب - العودة للمنزل</title>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: black; font-family: 'Courier New', Courier, monospace; }
+        #gameCanvas { width: 100%; height: 100%; display: block; }
+        
+        /* شاشة البداية والرسائل */
+        #uiLayer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; text-align: center; text-shadow: 2px 2px 5px red; z-index: 10; }
+        #startBtn { pointer-events: auto; padding: 15px 30px; font-size: 24px; background: rgba(139, 0, 0, 0.7); color: white; border: 2px solid darkred; border-radius: 10px; cursor: pointer; text-transform: uppercase; }
+        #message { font-size: 20px; margin-top: 20px; transition: opacity 1s; }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: black; opacity: 1; transition: opacity 2s; pointer-events: none; z-index: 5; }
+        
+        /* أدوات تحكم الجوال */
+        #controls { position: absolute; bottom: 0; left: 0; width: 100%; height: 50%; pointer-events: none; z-index: 8; display: none; }
+        #joystickZone { position: absolute; bottom: 20px; left: 20px; width: 120px; height: 120px; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; pointer-events: auto; touch-action: none; }
+        #joystickKnob { position: absolute; top: 35px; left: 35px; width: 50px; height: 50px; background: rgba(255,0,0,0.4); border-radius: 50%; pointer-events: none; }
+        #lookZone { position: absolute; top: 0; right: 0; width: 50%; height: 100vh; pointer-events: auto; touch-action: none; }
+        
+        /* إجبار الشاشة الأفقية */
+        @media screen and (orientation: portrait) {
+            #startBtn { display: none; }
+            #uiLayer::before { content: "يرجى تدوير الهاتف بالعرض (أفقياً) للعب"; font-size: 24px; color: red; }
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="overlay"></div>
+    <div id="uiLayer">
+        <button id="startBtn">دخول المنزل</button>
+        <div id="message"></div>
+    </div>
+    
+    <div id="controls">
+        <div id="joystickZone"><div id="joystickKnob"></div></div>
+        <div id="lookZone"></div>
+    </div>
+
+    <script>
+        // --- إعدادات Three.js الأساسية ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.15); // ضباب مرعب
+        
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 1.6, 8); // ارتفاع مستوى نظر الإنسان
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // --- الإضاءة (كشاف اللاعب) ---
+        const flashLight = new THREE.SpotLight(0xffffff, 1, 15, Math.PI / 6, 0.5, 1);
+        flashLight.position.set(0, 0, 0);
+        flashLight.castShadow = true;
+        scene.add(flashLight);
+        scene.add(flashLight.target);
+        
+        const ambientLight = new THREE.AmbientLight(0x111111); // ضوء خافت جداً
+        scene.add(ambientLight);
+
+        // --- بناء البيئة (المنزل) ---
+        const textureLoader = new THREE.TextureLoader();
+        // جدران وأرضيات بسيطة
+        const wallMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 });
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x1a0f0f, roughness: 0.8 });
+        
+        const floorGeo = new THREE.PlaneGeometry(20, 20);
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        function createWall(w, h, d, x, y, z) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
+            wall.position.set(x, y, z);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            scene.add(wall);
+        }
+        // جدران الغرفة
+        createWall(20, 4, 1, 0, 2, -10); // الجدار الأمامي
+        createWall(20, 4, 1, 0, 2, 10);  // الجدار الخلفي
+        createWall(1, 4, 20, -10, 2, 0); // يسار
+        createWall(1, 4, 20, 10, 2, 0);  // يمين
+
+        // السرير (الهدف)
+        const bedMat = new THREE.MeshStandardMaterial({ color: 0x550000 });
+        const bed = new THREE.Mesh(new THREE.BoxGeometry(3, 1, 4), bedMat);
+        bed.position.set(0, 0.5, -7);
+        bed.castShadow = true;
+        scene.add(bed);
+
+        // --- نظام الصوت (Web Audio API) لتوليد الأصوات برمجياً ---
+        let audioCtx;
+        function initAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function playWindSound() {
+            const bufferSize = audioCtx.sampleRate * 2; // 2 seconds buffer
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                data[i] = Math.random() * 2 - 1; // White noise
+            }
+            const noiseSource = audioCtx.createBufferSource();
+            noiseSource.buffer = buffer;
+            noiseSource.loop = true;
+
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 400; // تردد منخفض لصوت الرياح
+            
+            const gainNode = audioCtx.createGain();
+            gainNode.gain.value = 0.5;
+
+            noiseSource.connect(filter);
+            filter.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            noiseSource.start();
+
+            // جعل الرياح تعلو وتنخفض
+            setInterval(() => {
+                filter.frequency.setTargetAtTime(200 + Math.random() * 500, audioCtx.currentTime, 1);
+                gainNode.gain.setTargetAtTime(0.3 + Math.random() * 0.5, audioCtx.currentTime, 2);
+            }, 2000);
+        }
+
+        function playKnock() {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(60, audioCtx.currentTime); // تردد عميق
+            osc.frequency.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            
+            gain.gain.setValueAtTime(1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.1);
+        }
+
+        function triggerKnockingSequence() {
+            setTimeout(playKnock, 1000);
+            setTimeout(playKnock, 1300);
+            setTimeout(playKnock, 1600);
+            
+            setTimeout(() => {
+                setTimeout(playKnock, 0);
+                setTimeout(playKnock, 150);
+                setTimeout(playKnock, 300);
+                setTimeout(playKnock, 450);
+                showMessage("هناك شيء عند الباب...", "red");
+            }, 5000);
+        }
+
+        // --- أدوات التحكم (الجوال) ---
+        let moveForward = 0, moveRight = 0;
+        let pitch = 0, yaw = 0; // زوايا الكاميرا
+        
+        const joystickZone = document.getElementById('joystickZone');
+        const joystickKnob = document.getElementById('joystickKnob');
+        const lookZone = document.getElementById('lookZone');
+        
+        let jx = 0, jy = 0; // Joystick center
+        
+        joystickZone.addEventListener('touchstart', (e) => {
+            const rect = joystickZone.getBoundingClientRect();
+            jx = rect.left + rect.width / 2;
+            jy = rect.top + rect.height / 2;
+            handleJoystick(e.touches[0]);
+        });
+        joystickZone.addEventListener('touchmove', (e) => handleJoystick(e.touches[0]));
+        joystickZone.addEventListener('touchend', () => {
+            moveForward = 0; moveRight = 0;
+            joystickKnob.style.transform = `translate(0px, 0px)`;
+        });
+
+        function handleJoystick(touch) {
+            let dx = touch.clientX - jx;
+            let dy = touch.clientY - jy;
+            const distance = Math.min(Math.sqrt(dx*dx + dy*dy), 35); // Max radius
+            const angle = Math.atan2(dy, dx);
+            
+            const nx = Math.cos(angle) * distance;
+            const ny = Math.sin(angle) * distance;
+            
+            joystickKnob.style.transform = `translate(${nx}px, ${ny}px)`;
+            moveRight = (nx / 35) * 0.05;
+            moveForward = (ny / 35) * 0.05;
+        }
+
+        let lastTouchX = 0, lastTouchY = 0;
+        lookZone.addEventListener('touchstart', (e) => {
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+        });
+        lookZone.addEventListener('touchmove', (e) => {
+            const deltaX = e.touches[0].clientX - lastTouchX;
+            const deltaY = e.touches[0].clientY - lastTouchY;
+            
+            yaw -= deltaX * 0.005;
+            pitch -= deltaY * 0.005;
+            pitch = Math.max(-Math.PI/2.1, Math.min(Math.PI/2.1, pitch)); // منع انقلاب الكاميرا
+            
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+        });
+
+        // --- منطق اللعبة والقصة ---
+        let gameState = 'start'; // start, walk, sleep, horror
+        const msgDiv = document.getElementById('message');
+        
+        function showMessage(text, color="white") {
+            msgDiv.textContent = text;
+            msgDiv.style.color = color;
+            msgDiv.style.opacity = 1;
+            setTimeout(() => msgDiv.style.opacity = 0, 3000);
+        }
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            initAudio();
+            document.getElementById('uiLayer').style.display = 'none';
+            document.getElementById('overlay').style.opacity = 0;
+            document.getElementById('controls').style.display = 'block';
+            gameState = 'walk';
+            showMessage("يوم عمل طويل... اذهب إلى السرير لتنام");
+            
+            // قفل الشاشة بالعرض إذا أمكن
+            if(screen.orientation && screen.orientation.lock) {
+                screen.orientation.lock('landscape').catch(()=>{});
+            }
+        });
+
+        // --- حلقة التحديث والرسم ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameState !== 'start') {
+                // تحديث دوران الكاميرا
+                camera.rotation.set(pitch, yaw, 0, 'YXZ');
+
+                // تحديث الحركة
+                if(gameState === 'walk' || gameState === 'horror') {
+                    const direction = new THREE.Vector3();
+                    camera.getWorldDirection(direction);
+                    direction.y = 0; // منع الطيران
+                    direction.normalize();
+                    
+                    const rightVec = new THREE.Vector3();
+                    rightVec.crossVectors(camera.up, direction).normalize();
+
+                    camera.position.addScaledVector(direction, -moveForward);
+                    camera.position.addScaledVector(rightVec, moveRight);
+                    
+                    // منع الخروج من الجدران (تصادم بسيط جداً)
+                    camera.position.x = Math.max(-9, Math.min(9, camera.position.x));
+                    camera.position.z = Math.max(-9, Math.min(9, camera.position.z));
+                }
+
+                // ربط الكشاف بالكاميرا
+                flashLight.position.copy(camera.position);
+                const targetPos = new THREE.Vector3();
+                camera.getWorldDirection(targetPos);
+                targetPos.add(camera.position);
+                flashLight.target.position.copy(targetPos);
+
+                // أحداث القصة
+                if (gameState === 'walk') {
+                    const distToBed = camera.position.distanceTo(bed.position);
+                    if (distToBed < 3) {
+                        gameState = 'sleep';
+                        showMessage("اضغط هنا للنوم...", "gray");
+                        document.getElementById('overlay').style.opacity = 1;
+                        
+                        setTimeout(() => {
+                            gameState = 'horror';
+                            document.getElementById('overlay').style.opacity = 0;
+                            flashLight.intensity = 0.2; // الكشاف يضعف
+                            flashLight.color.setHex(0xffaaaa); // لون مرعب
+                            scene.fog.density = 0.3; // الضباب يزيد
+                            ambientLight.color.setHex(0x330000);
+                            
+                            playWindSound();
+                            triggerKnockingSequence();
+                            
+                            // إضاءة تومض (Flicker)
+                            setInterval(() => {
+                                flashLight.intensity = Math.random() > 0.8 ? 0 : 0.4;
+                            }, 100);
+
+                        }, 4000); // ينام لـ 4 ثواني ثم يبدأ الرعب
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // تفاعل حجم الشاشة
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
