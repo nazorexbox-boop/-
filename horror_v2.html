@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>لعبة الرعب - الكابوس الروتيني</title>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: black; font-family: 'Courier New', Courier, monospace; user-select: none; }
+        #gameCanvas { width: 100%; height: 100%; display: block; }
+        
+        /* شاشات القصة والواجهة */
+        #storyScreen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: black; color: white; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 20; text-align: center; padding: 20px; box-sizing: border-box; }
+        .story-text { font-size: 22px; line-height: 1.6; margin-bottom: 30px; text-shadow: 0 0 10px rgba(255,255,255,0.5); opacity: 0; transition: opacity 2s; }
+        #startBtn, #nextBtn { padding: 15px 40px; font-size: 20px; background: #333; color: white; border: 1px solid #777; border-radius: 5px; cursor: pointer; display: none; }
+        
+        #uiLayer { position: absolute; top: 10px; left: 0; width: 100%; text-align: center; pointer-events: none; z-index: 10; }
+        #objective { font-size: 18px; color: #ffeb3b; background: rgba(0,0,0,0.5); padding: 5px 15px; border-radius: 20px; display: inline-block; border: 1px solid #ffeb3b; }
+        #message { font-size: 20px; color: white; margin-top: 10px; text-shadow: 2px 2px 5px black; transition: opacity 0.5s; opacity: 0; }
+        
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: black; opacity: 1; transition: opacity 2s; pointer-events: none; z-index: 15; }
+        #bloodOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; box-shadow: inset 0 0 100px rgba(255,0,0,0.8); pointer-events: none; z-index: 14; opacity: 0; transition: opacity 1s; }
+
+        /* أدوات تحكم الجوال */
+        #controls { position: absolute; bottom: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 8; display: none; }
+        #joystickZone { position: absolute; bottom: 20px; left: 20px; width: 130px; height: 130px; background: rgba(255,255,255,0.05); border: 2px solid rgba(255,255,255,0.2); border-radius: 50%; pointer-events: auto; touch-action: none; }
+        #joystickKnob { position: absolute; top: 40px; left: 40px; width: 50px; height: 50px; background: rgba(255,255,255,0.5); border-radius: 50%; pointer-events: none; }
+        #lookZone { position: absolute; top: 0; right: 0; width: 50%; height: 100vh; pointer-events: auto; touch-action: none; }
+        
+        /* أزرار الأكشن */
+        #actionButtons { position: absolute; bottom: 20px; right: 20px; display: flex; gap: 15px; pointer-events: auto; }
+        .action-btn { width: 70px; height: 70px; border-radius: 50%; background: rgba(50,50,50,0.8); border: 2px solid #888; color: white; font-weight: bold; font-size: 14px; display: flex; justify-content: center; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.5); touch-action: manipulation; }
+        .action-btn:active { background: rgba(100,100,100,0.9); transform: scale(0.95); }
+
+        @media screen and (orientation: portrait) {
+            #storyScreen::before { content: "يرجى تدوير الهاتف بالعرض (Landscape) للعب"; font-size: 24px; color: red; display: block; margin-bottom: 20px; }
+            #nextBtn { display: none !important; }
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="storyScreen">
+        <div id="storyText" class="story-text"></div>
+        <button id="nextBtn">متابعة</button>
+        <button id="startBtn">بدء اللعبة</button>
+    </div>
+
+    <div id="overlay"></div>
+    <div id="bloodOverlay"></div>
+    
+    <div id="uiLayer">
+        <div id="objective">الهدف: توجه إلى باب المنزل</div>
+        <div id="message"></div>
+    </div>
+    
+    <div id="controls">
+        <div id="joystickZone"><div id="joystickKnob"></div></div>
+        <div id="lookZone"></div>
+        <div id="actionButtons">
+            <div id="btnFlashlight" class="action-btn">المصباح</div>
+            <div id="btnInteract" class="action-btn">تفاعل</div>
+        </div>
+    </div>
+
+    <script>
+        // --- نظام الصوت (Web Audio API) ---
+        let audioCtx;
+        function initAudio() {
+            if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function playSynthSound(type, freq, duration, vol=1) {
+            if(!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            if(type === 'sine' || type === 'triangle') osc.frequency.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        function playWind() {
+            const bufferSize = audioCtx.sampleRate * 2; 
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1; 
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = buffer;
+            noise.loop = true;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 300; 
+            const gain = audioCtx.createGain();
+            gain.gain.value = 0.8;
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            noise.start();
+            setInterval(() => {
+                filter.frequency.setTargetAtTime(100 + Math.random() * 600, audioCtx.currentTime, 1);
+            }, 2000);
+        }
+
+        // --- القصة ---
+        const storyLines = [
+            "الساعة الآن 2:00 صباحاً...",
+            "انتهى دوامك الشاق أخيراً، وأنت الآن أمام منزلك.",
+            "الجو بارد، والشارع هادئ بشكل مريب.",
+            "كل ما تريده الآن هو أن تأكل شيئاً، تغتسل، وتنام."
+        ];
+        let currentStoryLine = 0;
+        const storyTextDiv = document.getElementById('storyText');
+        const nextBtn = document.getElementById('nextBtn');
+        const startBtn = document.getElementById('startBtn');
+
+        function showNextStoryLine() {
+            if (currentStoryLine < storyLines.length) {
+                storyTextDiv.style.opacity = 0;
+                setTimeout(() => {
+                    storyTextDiv.innerText = storyLines[currentStoryLine];
+                    storyTextDiv.style.opacity = 1;
+                    currentStoryLine++;
+                    nextBtn.style.display = 'block';
+                }, 500);
+            } else {
+                nextBtn.style.display = 'none';
+                startBtn.style.display = 'block';
+            }
+        }
+        
+        nextBtn.addEventListener('click', () => {
+            initAudio();
+            playSynthSound('square', 100, 0.1, 0.1);
+            showNextStoryLine();
+        });
+        
+        setTimeout(showNextStoryLine, 1000);
+
+        // --- محرك اللعبة (Three.js) ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x050505); // سماء ليلية
+        scene.fog = new THREE.FogExp2(0x050505, 0.08);
+        
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 1.6, 15); // نقطة البداية (خارج المنزل)
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: false }); // إغلاق التنعيم لأداء أفضل للجوال
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.BasicShadowMap; // ظلال خفيفة على المعالج
+        document.body.appendChild(renderer.domElement);
+
+        // الإضاءة
+        const ambientLight = new THREE.AmbientLight(0x111122, 0.5); // ضوء قمر خفيف بالخارج
+        scene.add(ambientLight);
+
+        const houseLight = new THREE.PointLight(0xffe0b2, 0, 20); // نور المنزل (مطفأ بالبداية)
+        houseLight.position.set(0, 3, 0);
+        houseLight.castShadow = true;
+        scene.add(houseLight);
+
+        const flashLight = new THREE.SpotLight(0xffffff, 0, 15, Math.PI / 5, 0.5, 1);
+        flashLight.castShadow = true;
+        scene.add(flashLight);
+        scene.add(flashLight.target);
+        let flashlightOn = false;
+
+        // --- بناء البيئة ---
+        const wallMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 1 });
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8 });
+        const grassMat = new THREE.MeshStandardMaterial({ color: 0x0a1a0a });
+        
+        // الأرضية (خارج وداخل)
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(50, 50), grassMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        const houseFloor = new THREE.Mesh(new THREE.PlaneGeometry(16, 20), floorMat);
+        houseFloor.rotation.x = -Math.PI / 2;
+        houseFloor.position.set(0, 0.01, -2);
+        houseFloor.receiveShadow = true;
+        scene.add(houseFloor);
+
+        // جدران المنزل
+        function addWall(w, h, d, x, z) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
+            wall.position.set(x, h/2, z);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            scene.add(wall);
+        }
+        
+        addWall(16, 4, 1, 0, -12); // حائط خلفي
+        addWall(1, 4, 20, -8, -2); // حائط أيسر
+        addWall(1, 4, 20, 8, -2);  // حائط أيمن
+        addWall(6, 4, 1, -5, 8);   // واجهة يسار الباب
+        addWall(6, 4, 1, 5, 8);    // واجهة يمين الباب
+
+        // الباب الرئيسي (أحمر داكن)
+        const door = new THREE.Mesh(new THREE.BoxGeometry(4, 3.5, 0.5), new THREE.MeshStandardMaterial({color: 0x3a1111}));
+        door.position.set(0, 1.75, 8);
+        scene.add(door);
+
+        // كائنات المهام (مجسمات بسيطة تمثل الغرف)
+        const switchBox = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), new THREE.MeshStandardMaterial({color: 0x888888}));
+        switchBox.position.set(7.4, 1.5, 6); // بجانب الباب من الداخل
+        scene.add(switchBox);
+
+        const table = new THREE.Mesh(new THREE.BoxGeometry(3, 1, 2), new THREE.MeshStandardMaterial({color: 0x553311}));
+        table.position.set(-4, 0.5, 2); // المطبخ
+        scene.add(table);
+
+        const sink = new THREE.Mesh(new THREE.BoxGeometry(2, 1.2, 1.5), new THREE.MeshStandardMaterial({color: 0xaaaaaa}));
+        sink.position.set(5, 0.6, -2); // الحمام
+        scene.add(sink);
+
+        const bed = new THREE.Mesh(new THREE.BoxGeometry(4, 1, 5), new THREE.MeshStandardMaterial({color: 0x223355}));
+        bed.position.set(-3, 0.5, -8); // غرفة النوم
+        scene.add(bed);
+
+        // --- التحكم والحركة ---
+        let moveForward = 0, moveRight = 0, pitch = 0, yaw = 0;
+        const joystickZone = document.getElementById('joystickZone');
+        const joystickKnob = document.getElementById('joystickKnob');
+        const lookZone = document.getElementById('lookZone');
+        let jx = 0, jy = 0;
+
+        joystickZone.addEventListener('touchstart', (e) => {
+            const rect = joystickZone.getBoundingClientRect();
+            jx = rect.left + rect.width / 2; jy = rect.top + rect.height / 2;
+            handleJoystick(e.touches[0]);
+        });
+        joystickZone.addEventListener('touchmove', (e) => {
+            for(let i=0; i<e.touches.length; i++) {
+                if(e.touches[i].clientX < window.innerWidth/2) handleJoystick(e.touches[i]);
+            }
+        });
+        joystickZone.addEventListener('touchend', () => {
+            moveForward = 0; moveRight = 0;
+            joystickKnob.style.transform = `translate(0px, 0px)`;
+        });
+
+        function handleJoystick(touch) {
+            let dx = touch.clientX - jx; let dy = touch.clientY - jy;
+            const distance = Math.min(Math.sqrt(dx*dx + dy*dy), 40);
+            const angle = Math.atan2(dy, dx);
+            const nx = Math.cos(angle) * distance; const ny = Math.sin(angle) * distance;
+            joystickKnob.style.transform = `translate(${nx}px, ${ny}px)`;
+            moveRight = (nx / 40) * 0.08; moveForward = (ny / 40) * 0.08;
+        }
+
+        let lastTouchX = 0, lastTouchY = 0;
+        lookZone.addEventListener('touchstart', (e) => {
+            for(let i=0; i<e.touches.length; i++) {
+                if(e.touches[i].clientX > window.innerWidth/2) {
+                    lastTouchX = e.touches[i].clientX; lastTouchY = e.touches[i].clientY;
+                }
+            }
+        });
+        lookZone.addEventListener('touchmove', (e) => {
+            for(let i=0; i<e.touches.length; i++) {
+                if(e.touches[i].clientX > window.innerWidth/2) {
+                    yaw -= (e.touches[i].clientX - lastTouchX) * 0.005;
+                    pitch -= (e.touches[i].clientY - lastTouchY) * 0.005;
+                    pitch = Math.max(-Math.PI/2.1, Math.min(Math.PI/2.1, pitch));
+                    lastTouchX = e.touches[i].clientX; lastTouchY = e.touches[i].clientY;
+                }
+            }
+        });
+
+        // --- نظام المهام (Game Logic) ---
+        let gameStage = 'locked_out'; // locked_out, find_switch, eat, wash, sleep, horror
+        const objectiveEl = document.getElementById('objective');
+        const msgEl = document.getElementById('message');
+
+        function showMessage(text) {
+            msgEl.textContent = text;
+            msgEl.style.opacity = 1;
+            setTimeout(() => msgEl.style.opacity = 0, 3000);
+        }
+
+        function getDistance(obj) {
+            return camera.position.distanceTo(obj.position);
+        }
+
+        document.getElementById('btnFlashlight').addEventListener('touchstart', () => {
+            if(gameStage === 'locked_out') return showMessage("لا تحتاجه الآن بالخارج");
+            flashlightOn = !flashlightOn;
+            flashLight.intensity = flashlightOn ? 1.5 : 0;
+            playSynthSound('square', 300, 0.05, 0.1); // صوت النقر
+        });
+
+        document.getElementById('btnInteract').addEventListener('touchstart', () => {
+            if (gameStage === 'locked_out' && getDistance(door) < 4) {
+                // فتح الباب
+                door.position.x = 2.5; door.rotation.y = Math.PI/2; // يفتح
+                playSynthSound('sawtooth', 80, 0.5, 0.5); // صوت باب
+                gameStage = 'find_switch';
+                objectiveEl.innerText = "المنزل مظلم.. شغل المصباح وابحث عن مفتاح الكهرباء";
+                showMessage("الأنوار مطفأة! غريب..");
+                ambientLight.intensity = 0.05; // ظلام دامس بالداخل
+            } 
+            else if (gameStage === 'find_switch' && getDistance(switchBox) < 3) {
+                // تشغيل النور
+                houseLight.intensity = 0.8;
+                playSynthSound('square', 400, 0.1, 0.2); // طقة مفتاح
+                gameStage = 'eat';
+                objectiveEl.innerText = "أنت جائع، اذهب إلى طاولة المطبخ لتأكل";
+                showMessage("أخيراً، النور يعمل.");
+            }
+            else if (gameStage === 'eat' && getDistance(table) < 3) {
+                playSynthSound('sawtooth', 150, 0.2, 0.3); setTimeout(() => playSynthSound('sawtooth', 120, 0.2, 0.3), 300); // صوت أكل رمزي
+                gameStage = 'wash';
+                objectiveEl.innerText = "اذهب إلى الحمام واغسل وجهك";
+                showMessage("طعام بارد لكنه يفي بالغرض.");
+            }
+            else if (gameStage === 'wash' && getDistance(sink) < 3) {
+                playSynthSound('sine', 400, 1, 0.1); // صوت ماء رمزي
+                gameStage = 'sleep';
+                objectiveEl.innerText = "الوقت متأخر، توجه إلى السرير لتنام";
+                showMessage("أشعر بالإرهاق الشديد...");
+            }
+            else if (gameStage === 'sleep' && getDistance(bed) < 4) {
+                gameStage = 'horror';
+                document.getElementById('overlay').style.opacity = 1;
+                objectiveEl.innerText = "نام...";
+                
+                // بداية الرعب بعد ثواني
+                setTimeout(() => {
+                    document.getElementById('overlay').style.opacity = 0;
+                    houseLight.intensity = 0; // ينطفئ النور فجأة
+                    if(flashlightOn) flashLight.intensity = 0.3; // يضعف الفلاش
+                    flashLight.color.setHex(0xff0000); // أحمر
+                    scene.fog.color.setHex(0x330000);
+                    scene.fog.density = 0.15;
+                    objectiveEl.innerText = "ما هذا الصوت؟!!";
+                    
+                    playSynthSound('sawtooth', 50, 1, 1); // صوت رعب مفاجئ
+                    playWind();
+                    
+                    // طرق عنيف على الباب
+                    let knocks = 0;
+                    let knockInt = setInterval(() => {
+                        playSynthSound('square', 60, 0.1, 1);
+                        knocks++;
+                        if(knocks > 5) {
+                            clearInterval(knockInt);
+                            document.getElementById('bloodOverlay').style.opacity = 1;
+                            showMessage("إنه في الداخل!!!");
+                            
+                            // إضاءة تومض بشكل جنوني
+                            setInterval(() => flashLight.intensity = Math.random() > 0.5 ? 0 : 0.8, 100);
+                        }
+                    }, 400);
+
+                }, 4000);
+            }
+        });
+
+        // --- بدء اللعبة ---
+        startBtn.addEventListener('click', () => {
+            document.getElementById('storyScreen').style.display = 'none';
+            document.getElementById('controls').style.display = 'block';
+            document.getElementById('overlay').style.opacity = 0;
+            
+            if(screen.orientation && screen.orientation.lock) {
+                screen.orientation.lock('landscape').catch(()=>{});
+            }
+        });
+
+        // --- التحديث (Game Loop) ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameStage !== 'locked_out' || getDistance(door) > 2) {
+                camera.rotation.set(pitch, yaw, 0, 'YXZ');
+
+                const direction = new THREE.Vector3();
+                camera.getWorldDirection(direction);
+                direction.y = 0; direction.normalize();
+                
+                const rightVec = new THREE.Vector3();
+                rightVec.crossVectors(camera.up, direction).normalize();
+
+                // حفظ الموقع القديم للتصادم البسيط
+                const oldX = camera.position.x;
+                const oldZ = camera.position.z;
+
+                camera.position.addScaledVector(direction, -moveForward);
+                camera.position.addScaledVector(rightVec, moveRight);
+                
+                // حدود خريطة بسيطة جداً لمنع الخروج من العالم
+                if(camera.position.x < -10 || camera.position.x > 10 || camera.position.z < -15 || camera.position.z > 15) {
+                    camera.position.x = oldX; camera.position.z = oldZ;
+                }
+            }
+
+            // تحديث موقع الكشاف
+            flashLight.position.copy(camera.position);
+            const targetPos = new THREE.Vector3();
+            camera.getWorldDirection(targetPos);
+            targetPos.add(camera.position);
+            flashLight.target.position.copy(targetPos);
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
